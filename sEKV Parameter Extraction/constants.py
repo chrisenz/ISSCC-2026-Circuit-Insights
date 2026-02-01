@@ -1,0 +1,9 @@
+kB=1.38064852E-23
+q=1.60217662E-19
+T0=273.15
+epsilon0=8.854E-12
+epsilonox=3.9
+TC=27
+T=T0+TC
+kT=kB*T
+UT=kT/q

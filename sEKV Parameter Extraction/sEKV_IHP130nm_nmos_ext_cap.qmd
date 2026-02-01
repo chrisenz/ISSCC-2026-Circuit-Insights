@@ -1,0 +1,388 @@
+---
+title: |
+  sEKV Parameter Extraction for the IHP 130nm Process
+subtitle: nMOS Extrinsic Capacitances
+author: Christian Enz (christian.enz@epfl.ch)
+affiliation: EPFL
+date: 2-14-2026
+date-format: "DD.MM.YYYY"
+execute:
+  echo: false
+  warning: false
+toc: true
+number-sections: true
+number-depth: 4
+highlight-style: pygments
+bibliography: references.bib
+csl: ieee.csl
+format: 
+  html:
+    include-in-header: mathjax.html
+    code-fold: true
+    html-math-method: mathjax
+    css: styles.css
+    default-image-extension: svg
+  pdf:
+    keep-tex: true
+    pdf-engine: pdflatex
+    documentclass: scrreprt
+    papersize: a4
+    geometry:
+      - top=20mm
+      - bottom=20mm
+      - left=20mm
+      - right=20mm
+    include-in-header:
+      text: |
+        \usepackage{scrlayer-scrpage}
+        \rohead[\thepage]{\thepage}
+        \cohead[nMOS Extrinsic Capacitances]{nMOS Extrinsic Capacitances}
+        \lofoot[$\copyright$ C. Enz]{$\copyright$ C. Enz}
+        \cofoot[sEKV Parameter Extraction for the IHP 130nm Process]{sEKV Parameter Extraction for the IHP 130nm Process}
+        \rofoot[14.2.2026]{14.2.2026}
+---
+
+```{python}
+# Initialization
+
+from ekv_functions import *
+from constants import *
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import subprocess
+import shutil
+import os
+import os.path as op
+import sys
+sys.path.append(".")
+import re
+
+from PyLTSpice import SimRunner, SpiceEditor, RawRead
+from IPython.display import Markdown
+from tabulate import tabulate
+
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['mathtext.fontset'] = 'custom'
+plt.rcParams['mathtext.rm'] = 'Arial'
+plt.rcParams['mathtext.it'] = 'Arial:italic'
+plt.rcParams['mathtext.bf'] = 'Arial:bold'
+
+lw=1
+curvelw=1
+msize=5
+mevery=4
+textFontSize=9
+BodePlotParams = {'figure.figsize': (5,5)}
+twoSidebySidePlotsParams = {'figure.figsize': (7, 2.7)}
+twobytwoPlotsParams = {'figure.figsize': (7, 2.7)}
+pltStyle='plt_style_small.mplstyle'
+plt.style.use(pltStyle)
+
+#newSim=True
+newSim=False
+refloat=r'.*?([+-]?\d+([.]\d*)?([eE][+-]?\d+)?|[.]\d+([eE][+-]?\d+)?)'
+
+type='nmos'
+tYPE='nMOS'
+Type='nMOS (t-t)'
+size='long'
+
+def diff(y, dx):
+    N=len(y)
+    dydx=np.zeros(N)
+    dydx[0]=(y[1]-y[0])/dx
+    dydx[1]=(y[2]-y[0])/(2*dx)
+    for k in range(2,N-2):
+        dydx[k]=(y[k-2]-8*y[k-1]+8*y[k+1]-y[k+2])/(12*dx)
+    dydx[N-2]=(y[N-1]-y[N-3])/(2*dx)
+    dydx[N-1]=(y[N-1]-y[N-2])/dx
+    return dydx
+```
+
+
+# Introduction
+In this notebook we will extract the extrinsic capacitances, including junction, overlap and fringing capacitances for `{python} f'{tYPE}'` transistors of the 130nm bulk CMOS process from IHP @bib:ihp:2025. The parameters is extracted from the PDK of the IHP 130nm process @bib:ihp:2025.
+
+# Transistor geometry parameters
+## Effective length and width for current
+Before we start the extraction we need to account for the geometry dependence. With PSP you can choose between geometry scaling rules or binning rules with parameter $SWGEO$. If $SWGEO=1$, the scaling rules are chosen. This is the case in the IHP 130nm G2 PDK. The geometrical parameters are defined in @fig-cross_section @bib:psp103.6:2017.
+
+![Definition of transistor geometrical parameters @bib:psp103.6:2017.](Figures/transistor_cross_section.png){#fig-cross_section}
+
+The effective length and width are defined as
+\begin{align}
+  L_{eff} &= L - \Delta L,\\
+  W_{eff} &= W_f - \Delta W,
+\end{align}
+where $W_f$ is the width of one finger defined as
+\begin{equation}
+  W_f = \frac{W}{NF}.
+\end{equation}
+In our case we will assume that the number of fingers $NF=1$ and hence that $W_f = W$.
+$\Delta L$ and $\Delta W$ are given by
+\begin{align}
+  \Delta L &= 2\,LAP - \Delta L_{PS},\\
+  \Delta W &= 2\,WOT - \Delta W_{OD},
+\end{align}
+with
+\begin{align}
+  \Delta L_{PS} &= LVARO \cdot \left(1+LVARL \cdot \frac{L_{EN}}{L}\right) \cdot \left(1+LVARW \cdot \frac{W_{EN}}{W_f}\right),\\
+  \Delta W_{OD} &= WVARO \cdot \left(1+WVARL \cdot \frac{L_{EN}}{L}\right) \cdot \left(1+WVARW \cdot \frac{W_{EN}}{W_f}\right).
+\end{align}
+
+For nMOS $LVARO = 0$ and $WVARO = 0$ and therefore $\Delta L_{PS} = 0$ and $\Delta W_{OD} = 0$. The length and width reduction then reduce to
+\begin{align}
+  \Delta L &= 2\,LAP,\\
+  \Delta W &= 2\,WOT.
+\end{align}
+
+```{python}
+# Parameters to calculate the effective length and width for nMOS extracted from sg13g2_moslv_parm.lib
+LEN=1e-6
+WEN=1e-6
+lvaro = 0.0
+lvarl = 0.0
+lvarw = 0.0
+lap = 2.9423e-08
+wvaro = 0.0
+wvarl = 0.0
+wvarw = 0.0
+wot = -1e-08
+
+# Approximation of channel length and width reduction for current
+DLn=2*lap
+DWn=2*wot
+```
+
+The channel length and width reduction are then given in @tbl-length_width_corrections. Note that the width reduction $\Delta W$ for current is negative which means that the effective width is larger than the drawn width.
+
+## Effective length and width for capacitances
+The effective length and width are slightly different for the calculation of the capacitances. The effective length and width for the calculation of the intrinsic and overlap capacitances are defined as
+\begin{align}
+  L_{E,CV} &= L - \Delta L_{CV},\\
+  W_{E,CV} &= W - \Delta W_{CV},
+\end{align}
+where
+\begin{align}
+  \Delta L_{CV} &= 2\,LAP - \Delta L_{PS} - DLQ,\\
+  \Delta W_{CV} &= 2\,WOT - \Delta W_{OD} - DWQ.
+\end{align}
+
+Similarly to the length and width reduction for the current, the length and width reduction for the capacitance in the case of nMOS transistors simplify to
+\begin{align}
+  \Delta L_{CV} &= 2\,LAP - DLQ,\\
+  \Delta W_{CV} &= 2\,WOT - DWQ.
+\end{align}
+
+The effective length and width for the calculation of the fringing field capacitances are defined as
+\begin{align}
+  L_{G,CV} &= L - \Delta L_{G,CV},\\
+  W_{G,ov} &= W - \Delta W_{G,CV},
+\end{align}
+where
+\begin{align}
+  \Delta L_{G,CV} &= - DLQ,\\
+  \Delta W_{G,CV} &= - DWQ.
+\end{align}
+
+```{python}
+# Parameters extracted for pMOS from sg13g2_moslv_parm.lib
+pre_layout = 1
+dlq = -1.3721e-08-(1-pre_layout)*2e-08
+dwq = -1e-08
+
+# Approximation of channel length and width reduction for capacitance corresponding to infinite length and width transistor
+DLCVn=2*lap-dlq
+DWCVn=2*wot-dwq
+
+# Similarly for the fringing capacitances
+DLGCVn=-dlq
+DWGCVn=-dwq
+```
+
+```{python}
+#| label: tbl-length_width_corrections
+#| tbl-cap: Length and width corrections.
+
+sekv_geom_param_df={
+    "Length correction DL": [DLn/1e-9, DLCVn/1e-9, DLGCVn/1e-9],
+    "Width correction DW": [DWn/1e-9, DWCVn/1e-9, DWGCVn/1e-9],
+    "Comment": "extracted from PDK"
+}
+index_labels=["For current","For intrinsic and overlap capacitances","For fringing-field capacitances"]
+sekv_geom_param_df=pd.DataFrame(sekv_geom_param_df, index=index_labels)
+#pd.set_option('display.float_format', '{:.3e}'.format)
+#sekv_geom_param_df
+
+Markdown(tabulate(
+  sekv_geom_param_df,
+  headers=["Definition","$\Delta L$ [nm]","$\Delta W$ [nm]","Comment"],
+  numalign="center",
+  stralign="center",
+  colalign=("left","center","center","center"),
+  floatfmt=(".0f",".3f",".0f",".0f")
+))
+```
+
+# Extrinsic capacitances
+## Junction capacitances
+The calculation of the junction capacitances depends on the value used for the **SWJUNCAP** parameter. In this PDK **SWJUNCAP** is equal to 3 for which the junction area $AB$, junction length of side-wall capacitance along the STI edge $LS$ and junction length of the side-wall capacitance along the gate edge $LG$ are calculated according to
+\begin{align}
+  AB &= AS,\\
+  LS &= PS-W_E,\\
+  LG &= W_E,\\
+\end{align}
+where $AS$ is the source junction area and $PS$ the total source junction perimeter and
+\begin{align}
+  AB &= AD,\\
+  LS &= PD-W_E,\\
+  LG &= W_E,\\
+\end{align}
+where $AD$ is the drain junction area and $PD$ the total drain junction perimeter.
+
+The total junction capacitance on the source $CJS$ and drain side $CJD$ are then given by
+\begin{align}
+  CJS &= AS \cdot CJORBOT + (PS-W_E) \cdot CJORSTI + W_E \cdot CJORGAT,\\
+  CJD &= AD \cdot CJORBOT + (PD-W_E) \cdot CJORSTI + W_E \cdot CJORGAT,
+\end{align}
+where:
+
+  * **CJORBOT** is the zero-bias bottom capacitance per unit-area,
+  * **CJORSTI** is the zero-bias capacitance per unit-of-length along the STI-edge,
+  * **CJORGAT** is the zero-bias capacitance per unit-of-length along the gate-edge.
+
+The above junction capacitance parameters are extracted directly from the PDK. We will use the the zero-bias bias value of th various junctions capacitances.
+
+If $AS$, $PD$, $AD$ and $PD$ are not specified, they are calculated automatically in the sg13g2_moslv_mod.lib file.
+
+In the circuit examples, we will calculate $AS$, $PD$, $AD$ and $PD$ for avoiding the automatic cal.culation
+
+```{python}
+#| label: tbl-junction_parameters
+#| tbl-cap: Extraction of the junction capacitance parameters.
+
+# Values for nMOS taken from the cornerMOSlv.lib file for t-t
+sg13g2_lv_nmos_cjorbot= 1.0000
+sg13g2_lv_nmos_cjorsti= 1.0000
+sg13g2_lv_nmos_cjorgat= 1.0000
+
+# Values taken from the sg13g2_moslv_parm.lib file for t-t
+cjorbot = 0.00097636*sg13g2_lv_nmos_cjorbot 
+cjorsti = 2.5279e-11*sg13g2_lv_nmos_cjorsti
+cjorgat = 3e-11*sg13g2_lv_nmos_cjorgat
+
+# sEKV parameters
+CJn = cjorbot
+CJSWSTIn = cjorsti
+CJSWGATn = cjorgat
+
+sekv_juncap_param_df={
+    "Zero-bias junction capacitance": [CJn, CJSWSTIn, CJSWGATn],
+    "Unit": ["$\\frac{F}{m^2}$","$\\frac{F}{m}$","$\\frac{F}{m}$"],
+    "Comment": ["extracted from PDK","extracted from PDK","extracted from PDK"]
+}
+
+index_labels=["Bottom cap per area","Side-wall cap per unit length (along STI)","Side-wall cap per unit length (along gate)"]
+sekv_juncap_param_df=pd.DataFrame(sekv_juncap_param_df, index=index_labels)
+#sekv_juncap_param_df
+
+Markdown(tabulate(
+  sekv_juncap_param_df,
+  headers=["Definition","Zero-bias junction capacitance","Unit","Comment"],
+  numalign="center",
+  stralign="center",
+  colalign=("left","center","center","center"),
+  floatfmt=(".0f",".3e",".0f",".0f")
+))
+```
+
+## Overlap capacitances
+In PSP, the gate-to-source and gate-to-drain overlap capacitances are equal and given by
+\begin{equation}
+  CGOV = \epsilon_{ox} \cdot \frac{W_{E,CV} \cdot LOV}{TOXOV},
+\end{equation}
+where the effective length $L_{E,CV}$ and width $W_{E,CV}$ for the calculation of the intrinsic and overlap acacitances are defined as
+\begin{align}
+  L_{E,CV} &= L + \Delta L_{CV},\\
+  W_{E,CV} &= W + \Delta W_{CV},
+\end{align}
+where
+\begin{align}
+  \Delta L_{CV} &= 2\,LAP - \Delta L_{PS} - DLQ \cong 2\,LAP - LVARO - DLQ,\\
+  \Delta W_{CV} &= 2\,WOT - \Delta W_{OD} - DWQ \cong 2\,WOT - WVARO - DWQ.
+\end{align}
+
+## Fringing capacitances
+In PSP, the fringing field capacitance is given by
+\begin{equation}
+  CFR = CFRW \cdot \frac{W_{G,CV}}{W_{EN}},
+\end{equation}
+where
+\begin{equation}
+  W_{G,CV} = W_f + \Delta W_{OD} + DWQ \cong W_f + WVARO + DWQ
+\end{equation}
+
+The values of the overlap and fringing capacitances per effective unit width for $C_{GS}$ and $C_{GD}$ and per effective unit length for $C_{GB}$ are summarized in @tbl-overlap_parameters. We see that $CGBOn$ is almost negligible.
+
+```{python}
+#| label: tbl-overlap_parameters
+#| tbl-cap: Overlap and fringing capacitances per effective unit width for $C_{GS}$ and $C_{GD}$ and per effective unit length for $C_{GB}$.
+
+# Values taken from the cornerMOSlv.lib file for t-t
+sg13g2_lv_nmos_toxovo = 1.0000
+
+# Values taken from the sg13g2_moslv_parm.lib file for t-t
+pre_layout = 1.0
+epsroxo = 3.9
+
+# CGSo overlap capacitance per unit width
+toxovo = 2.2404e-09*sg13g2_lv_nmos_toxovo
+lov = 2.9423e-08-((1-pre_layout)*9e-09)
+CGSOn = epsilon0*epsroxo*lov/toxovo
+
+# CGDo overlap capacitance per unit width
+# toxovdo = 2e-09
+# CGDOn = epsilon0*epsroxo*lov/toxovdo
+CGDOn = CGSOn
+
+# CGBo overlap capacitance per unit length
+cgbovl = 4.4409e-28
+CGBOn = cgbovl/LEN
+
+# Fringing field capacitance per unit width
+cfrw=2e-16
+CGSFn=cfrw/WEN
+CGDFn=CGSFn
+
+# Total extrinsic capacitance per unit width
+CGSEn=CGSOn+CGSFn
+CGDEn=CGDOn+CGDFn
+
+sekv_extcap_param_df={
+    "CGS": [CGSOn, CGSFn, CGSEn],
+    "CGD": [CGDOn, CGDFn, CGDEn],
+    "CGB": [f'{CGBOn:.3e}', "-", f'{CGBOn:.3e}'],
+    "Unit": ["$\\frac{F}{m}$","$\\frac{F}{m}$","$\\frac{F}{m}$"],
+    "Comment": "extracted from PDK"
+}
+index_labels=["Overlap","Fringing","Total"]
+sekv_extcap_param_df=pd.DataFrame(sekv_extcap_param_df, index=index_labels)
+#sekv_extcap_param_df
+
+Markdown(tabulate(
+  sekv_extcap_param_df,
+  headers=["Definition","$C_{GS}$","$C_{GD}$","$C_{GB}$","Unit","Comment"],
+  numalign="center",
+  stralign="center",
+  colalign=("left","center","center","center","center","center"),
+  floatfmt=(".0f",".3e",".3e",".3e",".0e",".0e")
+))
+```
+
+# Conclusion
+The parameters of the extrinsic capacitances, including junction, overlap and fringing capacitances have been extracted from the PDK of the IHP 130nm process for the for `{python} f'{tYPE}'` transistors.
+
+# References
