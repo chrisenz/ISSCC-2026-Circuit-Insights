@@ -9,7 +9,7 @@ If you want to run the extraction on different transistor sizes, you need to gen
 
 Finally, if you want to extract the sEKV parameters on a different technology you can reuse the Quarto notebooks, but you then need to do have the PDK of the target technology.
 
-I hope you will find this repsotiory useful! An feedback is welcome. Send me a mail at christian.enz.@epfl.ch.
+I hope you will find this repository useful! Any feedback is welcome. Send me a mail at christian.enz@epfl.ch.
 
 Enjoy!
 
